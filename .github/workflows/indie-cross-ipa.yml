@@ -9,6 +9,9 @@ jobs:
   ios:
     runs-on: macos-15-intel
     timeout-minutes: 90
+    env:
+      IOS_APP: export/release/ios/build/Release-iphoneos/IndieCross.app
+      LUAJIT_REF: 4eef1dcb383acc270923f8009c046caa42a4b3b5
     steps:
       - name: Checkout Indie Cross Psych Engine source
         uses: actions/checkout@v4
@@ -78,7 +81,28 @@ jobs:
           Path(storage).write_text(source, encoding='utf-8')
           PY
 
+      - name: Fingerprint iPhone build
+        id: build_inputs
+        run: |
+          # Bump the prefix when changing compiler versions or build options.
+          fingerprint="$({
+            printf '%s\n' 'indiecross-ios-v1' "$LUAJIT_REF"
+            git rev-parse HEAD
+            git diff --binary HEAD
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+          } | shasum -a 256 | cut -d ' ' -f 1)"
+          echo "key=indiecross-ios-${RUNNER_ARCH}-${fingerprint}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiled iPhone app
+        id: cached_app
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.IOS_APP }}
+          key: ${{ steps.build_inputs.outputs.key }}
+
       - name: Set up Haxe
+        if: steps.cached_app.outputs.cache-hit != 'true'
         run: |
           brew install neko
           mkdir -p "$RUNNER_TEMP/haxe"
@@ -90,6 +114,7 @@ jobs:
           echo "HAXE_STD_PATH=$RUNNER_TEMP/haxe/std" >> "$GITHUB_ENV"
 
       - name: Install engine dependencies
+        if: steps.cached_app.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/haxelib"
           haxelib setup "$RUNNER_TEMP/haxelib"
@@ -100,7 +125,7 @@ jobs:
           haxelib --never install flixel-addons 3.2.0
           haxelib --never install flixel-ui 2.5.0
           haxelib --never install tjson 1.4.0
-          haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git
+          haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git "$LUAJIT_REF"
 
           # The Haxelib registry package for this version aborts compilation.
           sscript="$RUNNER_TEMP/SScript-6.1.80.zip"
@@ -111,11 +136,14 @@ jobs:
           haxelib --never install "$sscript"
 
       - name: Generate Xcode project
+        if: steps.cached_app.outputs.cache-hit != 'true'
         run: haxelib run lime update ios -arm64
 
       - name: Compile unsigned for iPhone
+        if: steps.cached_app.outputs.cache-hit != 'true'
         working-directory: export/release/ios
         run: |
+          export HXCPP_COMPILE_THREADS="$(sysctl -n hw.logicalcpu)"
           xcodebuild build \
             -project IndieCross.xcodeproj \
             -target IndieCross -configuration Release -sdk iphoneos \
@@ -123,22 +151,28 @@ jobs:
             CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
             CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos"
 
+      - name: Save compiled iPhone app
+        if: steps.cached_app.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.IOS_APP }}
+          key: ${{ steps.build_inputs.outputs.key }}
+
       - name: Verify app and package IPA
         run: |
-          app="$(find export -path '*/Release-iphoneos/IndieCross.app' -type d -print -quit)"
-          test -n "$app" && test -f "$app/Info.plist"
-          lipo -verify_arch arm64 "$app/IndieCross"
-          weeks="$(find "$app" -path '*/assets/weeks/weekList.txt' -type f -print -quit)"
-          test -n "$weeks"
+          test -f "$IOS_APP/Info.plist"
+          xcrun lipo "$IOS_APP/IndieCross" -verify_arch arm64
+          weeks="$(find "$IOS_APP" -path '*/assets/weeks/weekList.txt' -type f -print -quit)"
+          test -n "$weeks" || { echo 'Missing weekList.txt'; exit 1; }
           assets="$(dirname "$(dirname "$weeks")")"
           for song in snake-eyes sansational imminent-demise devils-gambit bad-time despair \
             satanic-funkin bad-to-the-bone bonedoggle ritual freaky-machine; do
             test -f "$assets/songs/$song/Inst.ogg" || { echo "Missing audio: $song"; exit 1; }
           done
           mkdir -p "$RUNNER_TEMP/indie-ipa/Payload"
-          ditto "$app" "$RUNNER_TEMP/indie-ipa/Payload/IndieCross.app"
+          ditto "$IOS_APP" "$RUNNER_TEMP/indie-ipa/Payload/IndieCross.app"
           cd "$RUNNER_TEMP/indie-ipa"
-          zip -q -r -y Indie-Cross-iOS.ipa Payload
+          zip -q -1 -r -y Indie-Cross-iOS.ipa Payload
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
