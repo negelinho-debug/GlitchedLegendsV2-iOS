@@ -40,6 +40,24 @@ jobs:
               '<section if="ios">\n\t\t\t<config:ios deployment="13.0" />',
           )
 
+          # The iOS window already uses the project's landscape setting.
+          replace(
+              'Project.xml',
+              '<haxelib name="extension-orientation" if="mobile" />',
+              '<haxelib name="extension-orientation" if="android" />',
+          )
+          extra = 'source/psychlua/ExtraFunctions.hx'
+          replace(
+              extra,
+              '#if mobile\nimport extension.eightsines.EsOrientation;',
+              '#if android\nimport extension.eightsines.EsOrientation;',
+          )
+          replace(
+              extra,
+              '#if mobile\n\t\tLua_helper.add_callback(lua, "changeOrientation"',
+              '#if android\n\t\tLua_helper.add_callback(lua, "changeOrientation"',
+          )
+
           storage = 'source/backend/SUtil.hx'
           replace(
               storage,
@@ -107,7 +125,6 @@ jobs:
           haxelib --never install SScript 6.1.80
           haxelib --never install tjson 1.4.0
           haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git
-          haxelib --never git extension-orientation https://github.com/HaxeExtension/extension-orientation.git
 
       - name: Compile for iPhone
         run: haxelib run lime build ios -arm64 -nosign
