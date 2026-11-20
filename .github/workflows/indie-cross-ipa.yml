@@ -25,12 +25,12 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace(path, old, new):
+          def replace(path, old, new, count=1):
               file = Path(path)
               source = file.read_text(encoding='utf-8')
-              if source.count(old) != 1:
+              if source.count(old) != count:
                   raise SystemExit(f'Unexpected source at {path}: {old!r}')
-              file.write_text(source.replace(old, new, 1), encoding='utf-8')
+              file.write_text(source.replace(old, new), encoding='utf-8')
 
           replace('Project.xml',
                   'title="Indie Cross-PsychEngine" file="Indie-Cross" packageName="com.idniesus.karimakra" package="com.idniesus.karimakra"',
@@ -67,7 +67,7 @@ jobs:
           source = source.replace("SUtil.getPath() + 'logs", "SUtil.writablePath() + 'logs")
           source = source.replace("SUtil.getPath()\n\t\t\t\t+ 'logs/'", "SUtil.writablePath()\n\t\t\t\t+ 'logs/'")
           source = source.replace("SUtil.getPath() + 'saves", "SUtil.writablePath() + 'saves")
-          method = '''\tprivate static function writablePath():String
+          method = '''\tpublic static function writablePath():String
           \t{
           \t\t#if ios
           \t\treturn Path.addTrailingSlash(LimeSystem.applicationStorageDirectory);
@@ -79,6 +79,39 @@ jobs:
           '''
           source = source.replace('\tpublic static function checkFiles():Void', method + '\tpublic static function checkFiles():Void', 1)
           Path(storage).write_text(source, encoding='utf-8')
+          replace(storage, '\tpublic static function checkFiles():Void\n\t{\n\t\t#if android',
+                  '\tpublic static function checkFiles():Void\n\t{\n'
+                  '\t\t#if ios\n\t\tvar dataDirectory = writablePath();\n'
+                  '\t\tif (!FileSystem.exists(dataDirectory)) FileSystem.createDirectory(dataDirectory);\n'
+                  '\t\t#end\n\t\t#if android')
+
+          # Keep the mod order in writable storage while reading the bundled assets.
+          mods = 'source/backend/Mods.hx'
+          replace(mods, '\tpublic static var updatedOnState:Bool = false;',
+                  '''\tpublic static function getListPath():String
+          \t\treturn SUtil.writablePath() + 'modsList.txt';
+
+          \tprivate static function readList():Array<String>
+          \t{
+          \t\t#if (ios && sys)
+          \t\tvar path = getListPath();
+          \t\treturn FileSystem.exists(path) ? CoolUtil.listFromString(File.getContent(path)) : [];
+          \t\t#else
+          \t\treturn CoolUtil.coolTextFile('modsList.txt');
+          \t\t#end
+          \t}
+
+          \tpublic static var updatedOnState:Bool = false;''')
+          replace(mods, "for (mod in CoolUtil.coolTextFile('modsList.txt'))",
+                  'for (mod in readList())', count=2)
+          replace(mods, "File.saveContent(SUtil.getPath() + 'modsList.txt', fileStr);",
+                  'File.saveContent(getListPath(), fileStr);')
+          replace('source/states/ModsMenuState.hx', "var path:String = SUtil.getPath() + 'modsList.txt';",
+                  'var path:String = Mods.getListPath();')
+          replace('source/backend/WeekData.hx', '\t\t#if MODS_ALLOWED\n\t\tif (FileSystem.exists("modsList.txt"))',
+                  '\t\t#if (ios && MODS_ALLOWED)\n\t\tMods.loadTopMod();\n'
+                  '\t\t#elseif MODS_ALLOWED\n\t\tif (FileSystem.exists("modsList.txt"))')
+          replace('source/lime/utils/Log.hx', 'SUtil.getPath()', 'SUtil.writablePath()', count=3)
           PY
 
       - name: Fingerprint iPhone build
@@ -180,4 +213,4 @@ jobs:
           name: Indie-Cross-iOS
           path: ${{ runner.temp }}/indie-ipa/Indie-Cross-iOS.ipa
           if-no-files-found: error
-          compression-level: 0
+          compression-level
