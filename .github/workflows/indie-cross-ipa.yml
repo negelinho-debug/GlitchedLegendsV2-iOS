@@ -1,95 +1,138 @@
-name: Get Indie Cross iOS IPA
+name: Build Indie Cross iOS
 
-on:
-  workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: Optional direct HTTPS link to a mirror of the iOS IPA
-        type: string
-        required: false
+on: workflow_dispatch
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
-  ipa:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      RELEASE_PAGE: https://www.mediafire.com/file/sqteop2ltpyhm7q/giga_indie.ipa/file
-      IPA_URL: ${{ inputs.ipa_url }}
+  ios:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
     steps:
-      - name: Download and verify iPhone app
-        shell: bash
+      - name: Checkout Indie Cross Psych Engine source
+        uses: actions/checkout@v4
+        with:
+          repository: KarimAkra-Stuff/Indie-Cross-Psych-Engine
+          ref: 5c896bbe273504b28dcf0564b9514cc9abb96358
+          persist-credentials: false
+
+      - name: Configure iPhone app and bundled assets
         run: |
-          ipa="$RUNNER_TEMP/Indie-Cross-iOS-V2.ipa"
-          headers=()
-          if [[ -z "$IPA_URL" ]]; then
-            page="$RUNNER_TEMP/indie-release.html"
-            cookies="$RUNNER_TEMP/indie-cookies.txt"
-            curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 \
-              --connect-timeout 20 --max-time 60 --user-agent 'Mozilla/5.0' \
-              --cookie-jar "$cookies" --output "$page" -- "$RELEASE_PAGE"
-            IPA_URL=$(python3 - "$page" <<'PY'
-          from html.parser import HTMLParser
+          python3 - <<'PY'
           from pathlib import Path
-          from urllib.parse import urlsplit
-          import sys
 
-          class MediaFirePage(HTMLParser):
-              url = ''
+          def replace(path, old, new):
+              file = Path(path)
+              source = file.read_text(encoding='utf-8')
+              if source.count(old) != 1:
+                  raise SystemExit(f'Unexpected source at {path}: {old!r}')
+              file.write_text(source.replace(old, new, 1), encoding='utf-8')
 
-              def handle_starttag(self, tag, attrs):
-                  attrs = dict(attrs)
-                  if tag == 'a' and attrs.get('id') == 'downloadButton':
-                      self.url = attrs.get('href') or ''
+          replace(
+              'Project.xml',
+              'title="Indie Cross-PsychEngine" file="Indie-Cross" packageName="com.idniesus.karimakra" package="com.idniesus.karimakra"',
+              'title="Indie Cross" file="IndieCross" packageName="org.funkin.indiecross" package="org.funkin.indiecross"',
+          )
+          replace(
+              'Project.xml',
+              '<section if="ios">',
+              '<section if="ios">\n\t\t\t<config:ios deployment="13.0" />',
+          )
 
-          parser = MediaFirePage()
-          parser.feed(Path(sys.argv[1]).read_text(errors='replace'))
-          url = urlsplit(parser.url)
-          if url.scheme != 'https' or not (url.hostname or '').endswith('.mediafire.com'):
-              sys.exit('MediaFire did not expose the iOS download link.')
-          print(parser.url)
+          storage = 'source/backend/SUtil.hx'
+          replace(
+              storage,
+              'daPath = LimeSystem.applicationStorageDirectory;',
+              'var appPath = Path.addTrailingSlash(LimeSystem.applicationDirectory);\n'
+              '\t\tvar resourcePath = appPath + "assets/";\n'
+              '\t\tdaPath = FileSystem.exists(resourcePath + "assets/weeks/weekList.txt") ? resourcePath : appPath;',
+          )
+          replace(
+              storage,
+              "#if mobile\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
+              "#if (mobile && !ios)\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
+          )
+
+          replace(
+              'source/Main.hx',
+              '\t\tSUtil.checkFiles();',
+              '\t\t#if ios\n\t\tSys.setCwd(SUtil.getPath());\n\t\t#end\n\t\tSUtil.checkFiles();',
+          )
+
+          # Keep crash reports and chart exports in writable storage.
+          source = Path(storage).read_text(encoding='utf-8')
+          source = source.replace("SUtil.getPath() + 'logs", "SUtil.writablePath() + 'logs")
+          source = source.replace(
+              "SUtil.getPath()\n\t\t\t\t+ 'logs/'",
+              "SUtil.writablePath()\n\t\t\t\t+ 'logs/'",
+          )
+          source = source.replace("SUtil.getPath() + 'saves", "SUtil.writablePath() + 'saves")
+          method = '''\tprivate static function writablePath():String
+          \t{
+          \t\t#if ios
+          \t\treturn Path.addTrailingSlash(LimeSystem.applicationStorageDirectory);
+          \t\t#else
+          \t\treturn getPath();
+          \t\t#end
+          \t}
+
+          '''
+          signature = '\tpublic static function checkFiles():Void'
+          source = source.replace(signature, method + signature, 1)
+          Path(storage).write_text(source, encoding='utf-8')
           PY
-            )
-            headers=(--cookie "$cookies" --referer "$RELEASE_PAGE")
-          fi
 
-          curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 \
-            --connect-timeout 20 --max-time 660 --retry-max-time 720 \
-            --user-agent 'Mozilla/5.0' "${headers[@]}" --output "$ipa" -- "$IPA_URL"
-          python3 - "$ipa" <<'PY'
-          from pathlib import PurePosixPath
-          from zipfile import BadZipFile, ZipFile
-          import plistlib
-          import sys
+      - name: Set up Haxe
+        run: |
+          brew install neko
+          mkdir -p "$RUNNER_TEMP/haxe"
+          curl -fsSL --retry 3 \
+            https://github.com/HaxeFoundation/haxe/releases/download/4.3.7/haxe-4.3.7-osx.tar.gz \
+            --output "$RUNNER_TEMP/haxe.tar.gz"
+          tar -xzf "$RUNNER_TEMP/haxe.tar.gz" -C "$RUNNER_TEMP/haxe" --strip-components=1
+          echo "$RUNNER_TEMP/haxe" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$RUNNER_TEMP/haxe/std" >> "$GITHUB_ENV"
 
-          try:
-              with ZipFile(sys.argv[1]) as archive:
-                  entries = set(archive.namelist())
-                  for name in sorted(entries):
-                      path = PurePosixPath(name)
-                      if (len(path.parts) != 3 or path.parts[0] != 'Payload'
-                          or path.name != 'Info.plist' or path.parent.suffix != '.app'):
-                          continue
-                      app = plistlib.loads(archive.read(name))
-                      executable = app.get('CFBundleExecutable', '')
-                      platforms = app.get('CFBundleSupportedPlatforms', [])
-                      if platforms and 'iPhoneOS' not in platforms:
-                          continue
-                      binary = str(path.parent / executable)
-                      if executable and binary in entries and archive.getinfo(binary).file_size > 0:
-                          print('Found iOS app:', app.get('CFBundleDisplayName') or path.parent.stem)
-                          break
-                  else:
-                      sys.exit('No iOS app bundle and executable found inside Payload/.')
-          except (BadZipFile, plistlib.InvalidFileException):
-              sys.exit('The server returned an invalid IPA. Check the release link or provide a direct IPA mirror.')
-          PY
+      - name: Install engine dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/haxelib"
+          haxelib setup "$RUNNER_TEMP/haxelib"
+          haxelib --never install hxcpp 4.3.2
+          haxelib --never install lime 7.9.0
+          haxelib --never install openfl 9.2.1
+          haxelib --never install flixel 5.3.1
+          haxelib --never install flixel-addons 3.2.0
+          haxelib --never install flixel-ui 2.5.0
+          haxelib --never install SScript 6.1.80
+          haxelib --never install tjson 1.4.0
+          haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git
+          haxelib --never git extension-orientation https://github.com/HaxeExtension/extension-orientation.git
+
+      - name: Compile for iPhone
+        run: haxelib run lime build ios -arm64 -nosign
+
+      - name: Verify app and package IPA
+        run: |
+          app="$(find export -path '*/Release-iphoneos/IndieCross.app' -type d -print -quit)"
+          test -n "$app" && test -f "$app/Info.plist"
+          lipo -verify_arch arm64 "$app/IndieCross"
+          weeks="$(find "$app" -path '*/assets/weeks/weekList.txt' -type f -print -quit)"
+          test -n "$weeks"
+          assets="$(dirname "$(dirname "$weeks")")"
+          for song in snake-eyes sansational imminent-demise devils-gambit bad-time despair \
+            satanic-funkin bad-to-the-bone bonedoggle ritual freaky-machine; do
+            test -f "$assets/songs/$song/Inst.ogg" || { echo "Missing audio: $song"; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/indie-ipa/Payload"
+          ditto "$app" "$RUNNER_TEMP/indie-ipa/Payload/IndieCross.app"
+          cd "$RUNNER_TEMP/indie-ipa"
+          zip -q -r -y Indie-Cross-iOS.ipa Payload
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Indie-Cross-iOS-V2
-          path: ${{ runner.temp }}/Indie-Cross-iOS-V2.ipa
+          name: Indie-Cross-iOS
+          path: ${{ runner.temp }}/indie-ipa/Indie-Cross-iOS.ipa
           if-no-files-found: error
           compression-level: 0
