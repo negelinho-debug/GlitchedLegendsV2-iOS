@@ -29,61 +29,40 @@ jobs:
                   raise SystemExit(f'Unexpected source at {path}: {old!r}')
               file.write_text(source.replace(old, new, 1), encoding='utf-8')
 
-          replace(
-              'Project.xml',
-              'title="Indie Cross-PsychEngine" file="Indie-Cross" packageName="com.idniesus.karimakra" package="com.idniesus.karimakra"',
-              'title="Indie Cross" file="IndieCross" packageName="org.funkin.indiecross" package="org.funkin.indiecross"',
-          )
-          replace(
-              'Project.xml',
-              '<section if="ios">',
-              '<section if="ios">\n\t\t\t<config:ios deployment="13.0" />',
-          )
+          replace('Project.xml',
+                  'title="Indie Cross-PsychEngine" file="Indie-Cross" packageName="com.idniesus.karimakra" package="com.idniesus.karimakra"',
+                  'title="Indie Cross" file="IndieCross" packageName="org.funkin.indiecross" package="org.funkin.indiecross"')
+          replace('Project.xml', '<section if="ios">',
+                  '<section if="ios">\n\t\t\t<config:ios deployment="13.0" />')
 
-          # On iOS, the project window settings specify landscape orientation.
-          replace(
-              'Project.xml',
-              '<haxelib name="extension-orientation" if="mobile" />',
-              '<haxelib name="extension-orientation" if="android" />',
-          )
+          # The iOS window already uses the project's landscape setting.
+          replace('Project.xml', '<haxelib name="extension-orientation" if="mobile" />',
+                  '<haxelib name="extension-orientation" if="android" />')
           extra = 'source/psychlua/ExtraFunctions.hx'
-          replace(
-              extra,
-              '#if mobile\nimport extension.eightsines.EsOrientation;',
-              '#if android\nimport extension.eightsines.EsOrientation;',
-          )
-          replace(
-              extra,
-              '#if mobile\n\t\tLua_helper.add_callback(lua, "changeOrientation"',
-              '#if android\n\t\tLua_helper.add_callback(lua, "changeOrientation"',
-          )
+          replace(extra, '#if mobile\nimport extension.eightsines.EsOrientation;',
+                  '#if android\nimport extension.eightsines.EsOrientation;')
+          replace(extra, '#if mobile\n\t\tLua_helper.add_callback(lua, "changeOrientation"',
+                  '#if android\n\t\tLua_helper.add_callback(lua, "changeOrientation"')
+          replace('source/states/TitleState.hx',
+                  '#if mobile\n\t\tFlxG.android.preventDefaultKeys = [BACK];',
+                  '#if android\n\t\tFlxG.android.preventDefaultKeys = [BACK];')
 
           storage = 'source/backend/SUtil.hx'
-          replace(
-              storage,
-              'daPath = LimeSystem.applicationStorageDirectory;',
-              'var appPath = Path.addTrailingSlash(LimeSystem.applicationDirectory);\n'
-              '\t\tvar resourcePath = appPath + "assets/";\n'
-              '\t\tdaPath = FileSystem.exists(resourcePath + "assets/weeks/weekList.txt") ? resourcePath : appPath;',
-          )
-          replace(
-              storage,
-              "#if mobile\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
-              "#if (mobile && !ios)\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
-          )
-          replace(
-              'source/Main.hx',
-              '\t\tSUtil.checkFiles();',
-              '\t\t#if ios\n\t\tSys.setCwd(SUtil.getPath());\n\t\t#end\n\t\tSUtil.checkFiles();',
-          )
+          replace(storage, 'daPath = LimeSystem.applicationStorageDirectory;',
+                  'var appPath = Path.addTrailingSlash(LimeSystem.applicationDirectory);\n'
+                  '\t\tvar resourcePath = appPath + "assets/";\n'
+                  '\t\tdaPath = FileSystem.exists(resourcePath + "assets/weeks/weekList.txt") ? resourcePath : appPath;')
+          replace(storage, '#if mobile\n\t\tif (!FileSystem.exists(SUtil.getPath() + \'assets\')',
+                  '#if (mobile && !ios)\n\t\tif (!FileSystem.exists(SUtil.getPath() + \'assets\')')
 
-          # Write crash reports and chart exports to the app's writable container.
+          main = 'source/Main.hx'
+          replace(main, '\t\tSUtil.checkFiles();',
+                  '\t\t#if ios\n\t\tSys.setCwd(SUtil.getPath());\n\t\t#end\n\t\tSUtil.checkFiles();')
+
+          # Keep crash reports and chart exports in the writable app container.
           source = Path(storage).read_text(encoding='utf-8')
           source = source.replace("SUtil.getPath() + 'logs", "SUtil.writablePath() + 'logs")
-          source = source.replace(
-              "SUtil.getPath()\n\t\t\t\t+ 'logs/'",
-              "SUtil.writablePath()\n\t\t\t\t+ 'logs/'",
-          )
+          source = source.replace("SUtil.getPath()\n\t\t\t\t+ 'logs/'", "SUtil.writablePath()\n\t\t\t\t+ 'logs/'")
           source = source.replace("SUtil.getPath() + 'saves", "SUtil.writablePath() + 'saves")
           method = '''\tprivate static function writablePath():String
           \t{
@@ -95,8 +74,7 @@ jobs:
           \t}
 
           '''
-          signature = '\tpublic static function checkFiles():Void'
-          source = source.replace(signature, method + signature, 1)
+          source = source.replace('\tpublic static function checkFiles():Void', method + '\tpublic static function checkFiles():Void', 1)
           Path(storage).write_text(source, encoding='utf-8')
           PY
 
@@ -121,9 +99,16 @@ jobs:
           haxelib --never install flixel 5.3.1
           haxelib --never install flixel-addons 3.2.0
           haxelib --never install flixel-ui 2.5.0
-          haxelib --never install SScript 6.1.80
           haxelib --never install tjson 1.4.0
           haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git
+
+          # The Haxelib registry package for this version aborts compilation.
+          sscript="$RUNNER_TEMP/SScript-6.1.80.zip"
+          curl -fsSL --retry 3 \
+            'https://raw.githubusercontent.com/CCobaltDev/SScript-Archive/eed92c5108107f0a6a2359a1029dd136ef6817cd/archives/SScript-6%2C1%2C80.zip' \
+            --output "$sscript"
+          printf '%s  %s\n' '6fb4e1f1b4caf441fda47945902195dfe5781e7337289d8d2edf18823ccce5a1' "$sscript" | shasum -a 256 -c -
+          haxelib --never install "$sscript"
 
       - name: Generate Xcode project
         run: haxelib run lime update ios -arm64
