@@ -40,7 +40,7 @@ jobs:
               '<section if="ios">\n\t\t\t<config:ios deployment="13.0" />',
           )
 
-          # The iOS window already uses the project's landscape setting.
+          # On iOS, the project window settings specify landscape orientation.
           replace(
               'Project.xml',
               '<haxelib name="extension-orientation" if="mobile" />',
@@ -71,14 +71,13 @@ jobs:
               "#if mobile\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
               "#if (mobile && !ios)\n\t\tif (!FileSystem.exists(SUtil.getPath() + 'assets')",
           )
-
           replace(
               'source/Main.hx',
               '\t\tSUtil.checkFiles();',
               '\t\t#if ios\n\t\tSys.setCwd(SUtil.getPath());\n\t\t#end\n\t\tSUtil.checkFiles();',
           )
 
-          # Keep crash reports and chart exports in writable storage.
+          # Write crash reports and chart exports to the app's writable container.
           source = Path(storage).read_text(encoding='utf-8')
           source = source.replace("SUtil.getPath() + 'logs", "SUtil.writablePath() + 'logs")
           source = source.replace(
@@ -126,8 +125,18 @@ jobs:
           haxelib --never install tjson 1.4.0
           haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit.git
 
-      - name: Compile for iPhone
-        run: haxelib run lime build ios -arm64 -nosign
+      - name: Generate Xcode project
+        run: haxelib run lime update ios -arm64
+
+      - name: Compile unsigned for iPhone
+        working-directory: export/release/ios
+        run: |
+          xcodebuild build \
+            -project IndieCross.xcodeproj \
+            -target IndieCross -configuration Release -sdk iphoneos \
+            ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos"
 
       - name: Verify app and package IPA
         run: |
