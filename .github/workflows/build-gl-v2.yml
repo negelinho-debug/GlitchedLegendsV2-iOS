@@ -1,210 +1,181 @@
-name: Build Glitched Legends V2 IPA
+name: Fix GL V2 on iPhone
 
 "on":
   push:
     paths:
-      - .github/workflows/build-gl-v2.yml
+      - .github/workflows/fix-gl-v2-game-over.yml
   workflow_dispatch:
     inputs:
-      apk_url:
-        description: Optional direct APK URL
+      original_run:
+        description: Optional GitHub Actions run ID of the original successful build
         type: string
         required: false
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  ios:
-    runs-on: macos-15-intel
-    timeout-minutes: 90
-    env:
-      HAXE_VERSION: '4.3.7'
-      APK_URL: ${{ inputs.apk_url || 'https://drive.usercontent.google.com/download?id=1zTfCsLoiP1H4pI-93lw7OivpdKnK7PMD&export=download&confirm=t' }}
+  patch_ipa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Get Psych Engine 0.6.3 iOS source
-        uses: actions/checkout@v4
-        with:
-          repository: BrenninhoTools/FNF-PsychEngine-0.6.3-Mobile
-          ref: v0.6.3
-          persist-credentials: false
-
-      - name: Download APK
+      - name: Download original unsigned IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.original_run }}
         run: |
-          curl --fail --silent --show-error --location --retry 3 \
-            --connect-timeout 25 --max-time 1200 \
-            "$APK_URL" --output "$RUNNER_TEMP/gl-v2.apk"
+          run_id="$ORIGINAL_RUN"
+          if [ -z "$run_id" ]; then
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gl-v2.yml \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+            echo 'No successful build-gl-v2.yml run was found. Supply its run ID with Run workflow.' >&2
+            exit 1
+          fi
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --name GlitchedLegendsV2-iOS --dir "$RUNNER_TEMP/original-ipa"
+          test -f "$RUNNER_TEMP/original-ipa/GlitchedLegendsV2.ipa"
 
-      - name: Import GL V2 assets
+      - name: Fix Game Over, pause and Gravity Falls in the IPA
         run: |
           python3 - <<'PY'
-          import os
-          import shutil
-          from pathlib import Path, PurePosixPath
+          from copy import copy
+          from pathlib import Path
           from zipfile import ZipFile
+          import json
+          import os
+          import re
+          import shutil
 
-          tmp = Path(os.environ['RUNNER_TEMP'])
-          assets = Path('assets')
-          libraries = {'fonts', 'songs', 'shared', 'videos', *(f'week{n}' for n in range(2, 8))}
-          prefix = 'assets/assets/'
-          with ZipFile(tmp / 'gl-v2.apk') as apk:
-              names = set(apk.namelist())
+          temp = Path(os.environ['RUNNER_TEMP'])
+          original = temp / 'original-ipa' / 'GlitchedLegendsV2.ipa'
+          output = temp / 'GlitchedLegendsV2-iPhoneFix.ipa'
+
+          assets = 'Payload/GlitchedLegendsV2.app/assets/assets/'
+          first_script = assets + 'scripts/script5.lua'
+          second_script = assets + 'scripts/script8.lua'
+          pause_script = assets + 'scripts/script10.lua'
+          warning_script = assets + 'data/glitched-falls-v3/script6.lua'
+          otherworldly_chart = assets + 'data/otherworldly-open/otherworldly-open-hard.json'
+          otherworldly_song = assets + 'songs/otherworldly-open/'
+          retry_sound = assets + 'sounds/scroll.ogg'
+          retry_music = assets + 'music/scroll.ogg'
+
+          with ZipFile(original) as source:
+              names = set(source.namelist())
               required = {
-                  'weeks/weekList.txt', 'images/NOTE_assets.png',
-                  'images/glitched_healtbar.png', 'custom_events/DodgeBob.lua',
-                  'custom_notetypes/Donut_Note.lua', 'songs/homicide/Voices.ogg',
+                  first_script, second_script, retry_sound, pause_script, warning_script,
+                  otherworldly_chart, otherworldly_song + 'Inst.ogg',
+                  assets + 'characters/bf_pibby.json',
+                  assets + 'images/characters/bf_pibby.png',
+                  assets + 'images/characters/bf_pibby.xml',
+                  assets + 'sounds/sound_dead.ogg',
+                  assets + 'music/Deathbydarkness.ogg',
               }
-              missing = sorted(name for name in required if prefix + name not in names)
-              if missing:
-                  raise SystemExit(f'Wrong or incomplete APK. Missing: {missing}')
+              if missing := sorted(required - names):
+                  raise SystemExit(f'Original IPA is missing required files: {missing}')
 
-              instruments = {
-                  PurePosixPath(name).parent.name for name in names
-                  if name.startswith(prefix + 'songs/') and name.lower().endswith('/inst.ogg')
+              character = json.loads(source.read(assets + 'characters/bf_pibby.json'))
+              animations = {entry['anim'] for entry in character['animations']}
+              if not {'firstDeath', 'deathLoop', 'deathConfirm'} <= animations:
+                  raise SystemExit('Missing Game Over animations for bf_pibby')
+
+              setup = source.read(first_script)
+              previous = source.read(second_script)
+              if b"'bf_pibby'" not in setup or b"'bf-Death'" not in previous:
+                  raise SystemExit('Unexpected original Game Over scripts')
+              callbacks = re.findall(rb'\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(', previous)
+              if callbacks != [b'onCreate']:
+                  raise SystemExit('script8.lua has extra callbacks; refusing to overwrite them')
+              if not source.read(retry_sound).startswith(b'OggS'):
+                  raise SystemExit('Invalid original Retry sound')
+
+              pause = source.read(pause_script)
+              if not all(token in pause for token in (
+                  b'function onPause()', b'return Function_Stop',
+                  b'ILOVEBUTTONS', b'tinocoPaused',
+              )):
+                  raise SystemExit('Unexpected original keyboard-only pause script')
+
+              warning = source.read(warning_script).decode('utf-8')
+              if not all(token in warning for token in (
+                  'warnings/DIPPERWARNING', 'keys.justPressed.SPACE',
+                  'keys.justPressed.ESCAPE', 'endSong();',
+              )):
+                  raise SystemExit('Unexpected original Dipper warning script')
+              warning = warning.replace(
+                  'function onCreate()\n',
+                  "function onCreate()\n\taddHaxeLibrary('TouchUtil', 'mobile')\n",
+                  1,
+              )
+              warning_update = """function onUpdate()
+              if confirmed ~= 0 then return end
+              if not keyJustPressed('space') and runHaxeCode('return TouchUtil.justTapped();') ~= true then return end
+              confirmed = 1
+              allowCountdown = true
+              startCountdown()
+              doTweenAlpha('nomorewarningimage', 'warningimage', 0, 1, 'sineOut')
+              playSound('confirmMenu')
+              runTimer('get back', 6)
+              setProperty('did.alpha', 1)
+          end
+
+          """
+              warning, count = re.subn(
+                  r'(?ms)^function onUpdate\(\).*?(?=^function onTimerCompleted\()',
+                  warning_update, warning, count=1,
+              )
+              if count != 1 or "addHaxeLibrary('TouchUtil', 'mobile')" not in warning:
+                  raise SystemExit('Could not patch Dipper warning')
+
+              patches = {
+                  second_script: setup,
+                  pause_script: b'-- iOS uses the native touch pause menu from Psych Engine.\n',
+                  warning_script: warning.encode('utf-8'),
               }
-              charts = {
-                  PurePosixPath(name).parent.name for name in names
-                  if name.startswith(prefix + 'data/') and name.endswith('.json')
-                  and PurePosixPath(name).name not in {'events.json', 'dialogue.json'}
-              }
-              playable = sorted(instruments & charts)
-              if len(playable) != 82:
-                  raise SystemExit(f'Expected 82 songs with charts, found {len(playable)}')
-              (tmp / 'gl-song-list.txt').write_text('\n'.join(playable) + '\n')
+              if not any(name.casefold() == (otherworldly_song + 'Voices.ogg').casefold() for name in names):
+                  chart = json.loads(source.read(otherworldly_chart))
+                  chart['song']['needsVoices'] = False
+                  patches[otherworldly_chart] = json.dumps(
+                      chart, ensure_ascii=False, separators=(',', ':')
+                  ).encode('utf-8')
 
-              shutil.rmtree(assets / 'preload' / 'weeks', ignore_errors=True)
-              for entry in apk.infolist():
-                  if entry.is_dir() or not entry.filename.startswith(prefix):
-                      continue
-                  relative = PurePosixPath(entry.filename[len(prefix):])
-                  if relative.is_absolute() or '..' in relative.parts or not relative.parts:
-                      raise SystemExit(f'Invalid APK entry: {entry.filename}')
-                  if relative.parts[0] == 'songs':
-                      audio_name = {'inst.ogg': 'Inst.ogg', 'voices.ogg': 'Voices.ogg'}.get(relative.name.lower())
-                      if audio_name:
-                          relative = relative.with_name(audio_name)
-                  target = (assets if relative.parts[0] in libraries else assets / 'preload') / relative
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  with apk.open(entry) as source, target.open('wb') as output:
-                      shutil.copyfileobj(source, output, length=1024 * 1024)
+              with ZipFile(output, 'w') as dest:
+                  for entry in source.infolist():
+                      info = copy(entry)
+                      if entry.filename in patches:
+                          dest.writestr(info, patches[entry.filename])
+                      elif entry.is_dir():
+                          dest.writestr(info, b'')
+                      else:
+                          with source.open(entry) as src, dest.open(info, 'w') as dst:
+                              shutil.copyfileobj(src, dst, length=1024 * 1024)
+                  if retry_music not in names:
+                      info = copy(source.getinfo(retry_sound))
+                      info.filename = info.orig_filename = retry_music
+                      dest.writestr(info, source.read(retry_sound))
 
-              icon = 'res/drawable-xxxhdpi-v4/icon.png'
-              if icon in names:
-                  (tmp / 'gl-icon.png').write_bytes(apk.read(icon))
+          with ZipFile(output) as patched:
+              if patched.testzip() is not None:
+                  raise SystemExit('Could not verify the patched IPA')
+              if patched.read(first_script) != patched.read(second_script):
+                  raise SystemExit('Game Over scripts disagree')
+              if not patched.read(retry_music).startswith(b'OggS'):
+                  raise SystemExit('Retry music is missing or invalid')
+              for name, data in patches.items():
+                  if patched.read(name) != data:
+                      raise SystemExit(f'Could not verify the updated file: {name}')
 
-          def replace_once(path, before, after):
-              path = Path(path)
-              text = path.read_text()
-              if text.count(before) != 1:
-                  raise SystemExit(f'Unexpected upstream layout: {path}: {before!r}')
-              path.write_text(text.replace(before, after, 1))
-
-          project = 'Project.xml'
-          replace_once(project, 'title="FNF: Psych Engine 0.6.3" file="PsychEngine063"'
-                       ' packageName="com.shadowmario.psychengine063" package="com.shadowmario.psychengine063"',
-                       'title="Glitched Legends V2" file="GlitchedLegendsV2"'
-                       ' packageName="com.glitchedlegends.v2" package="com.glitchedlegends.v2"')
-
-          # Original Lua files, weeks and charts are looked up as files under assets/.
-          replace_once('source/Main.hx', '#if mobile\n\t\tSys.setCwd(mobile.StorageUtil.getStorageDirectory());',
-                       '#if ios\n\t\tvar appDir = lime.system.System.applicationDirectory;'
-                       '\n\t\tvar resourceDir = haxe.io.Path.join([appDir, "assets"]);'
-                       '\n\t\tvar weekList = haxe.io.Path.join([resourceDir, "assets", "weeks", "weekList.txt"]);'
-                       '\n\t\tSys.setCwd(sys.FileSystem.exists(weekList) ? resourceDir : appDir);'
-                       '\n\t\t#elseif mobile\n\t\tSys.setCwd(mobile.StorageUtil.getStorageDirectory());')
-          replace_once('source/Main.hx', 'path = "./crash/" + "PsychEngine_" + dateNow + ".txt";',
-                       'var crashDir = #if ios haxe.io.Path.join([lime.system.System.documentsDirectory, "crash"])'
-                       ' #else "./crash" #end;\n\t\tpath = haxe.io.Path.join([crashDir, "PsychEngine_" + dateNow + ".txt"]);')
-          replace_once('source/Main.hx', 'if (!FileSystem.exists("./crash/"))\n\t\t\tFileSystem.createDirectory("./crash/");',
-                       'if (!FileSystem.exists(crashDir))\n\t\t\tFileSystem.createDirectory(crashDir);')
-
-          # APK scripts sometimes reference image paths with different letter case.
-          paths = 'source/Paths.hx'
-          marker = '\tpublic static function getPath(file:String, type:AssetType, ?library:Null<String> = null)'
-          replace_once(paths, marker, r'''
-            static var bundledAssetNames:Map<String, String>;
-
-            static function resolveBundledAsset(path:String, type:AssetType):String
-            {
-                if (OpenFlAssets.exists(path, type))
-                    return path;
-
-                if (bundledAssetNames == null)
-                {
-                    bundledAssetNames = new Map<String, String>();
-                    for (name in OpenFlAssets.list())
-                        bundledAssetNames.set(name.toLowerCase(), name);
-                }
-
-                var resolved = bundledAssetNames.get(path.toLowerCase());
-                return resolved != null && OpenFlAssets.exists(resolved, type) ? resolved : path;
-            }
-          ''' + marker)
-          replace_once(paths, 'return getLibraryPath(file, library);',
-                       'return resolveBundledAsset(getLibraryPath(file, library), type);')
-          replace_once(paths, 'levelPath = getLibraryPathForce(file, currentLevel);',
-                       'levelPath = resolveBundledAsset(getLibraryPathForce(file, currentLevel), type);')
-          replace_once(paths, 'levelPath = getLibraryPathForce(file, "shared");',
-                       'levelPath = resolveBundledAsset(getLibraryPathForce(file, "shared"), type);')
-          replace_once(paths, 'return getPreloadPath(file);',
-                       'return resolveBundledAsset(getPreloadPath(file), type);')
-          print('Imported 82 songs, original Lua and GL V2 weeks')
+          print(f'Patched {output.name}: {output.stat().st_size:,} bytes')
           PY
 
-          if [ -f "$RUNNER_TEMP/gl-icon.png" ]; then
-            sips -z 1024 1024 "$RUNNER_TEMP/gl-icon.png" --out art/iconOG.png
-            for size in 16 32 64; do
-              sips -z "$size" "$size" "$RUNNER_TEMP/gl-icon.png" --out "art/icon$size.png"
-            done
-          fi
-
-      - name: Set up Haxe
-        run: |
-          brew install neko
-          mkdir -p "$RUNNER_TEMP/haxe"
-          curl -fsSL --retry 3 \
-            "https://github.com/HaxeFoundation/haxe/releases/download/$HAXE_VERSION/haxe-$HAXE_VERSION-osx.tar.gz" \
-            --output "$RUNNER_TEMP/haxe.tar.gz"
-          tar -xzf "$RUNNER_TEMP/haxe.tar.gz" -C "$RUNNER_TEMP/haxe" --strip-components=1
-          echo "$RUNNER_TEMP/haxe" >> "$GITHUB_PATH"
-          echo "HAXE_STD_PATH=$RUNNER_TEMP/haxe/std" >> "$GITHUB_ENV"
-
-      - name: Install engine dependencies
-        run: |
-          mkdir -p "$RUNNER_TEMP/haxelib"
-          haxelib setup "$RUNNER_TEMP/haxelib"
-          for library in hxcpp lime openfl flixel flixel-addons flixel-ui hscript hxvlc; do
-            haxelib --never install "$library" --quiet
-          done
-          haxelib --never git linc_luajit https://github.com/HomuHomu833/linc_luajit --quiet
-
-      - name: Build iOS app
-        run: haxelib run lime build ios -nosign
-
-      - name: Verify and package IPA
-        run: |
-          app=export/release/ios/build/Release-iphoneos/GlitchedLegendsV2.app
-          assets="$app/assets/assets"
-          test -d "$app"
-          test -f "$assets/weeks/weekList.txt"
-          test -f "$assets/songs/homicide/Voices.ogg"
-          test -f "$assets/images/glitched_healtbar.png"
-          while IFS= read -r song; do
-            test -f "$assets/songs/$song/Inst.ogg" || { echo "Missing song: $song"; exit 1; }
-          done < "$RUNNER_TEMP/gl-song-list.txt"
-          cmp assets/preload/custom_events/DodgeBob.lua "$assets/custom_events/DodgeBob.lua"
-          cmp assets/preload/custom_notetypes/Donut_Note.lua "$assets/custom_notetypes/Donut_Note.lua"
-          cmp assets/preload/images/NOTE_assets.png "$assets/images/NOTE_assets.png"
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          ditto "$app" "$RUNNER_TEMP/ipa/Payload/GlitchedLegendsV2.app"
-          cd "$RUNNER_TEMP/ipa"
-          zip -qr GlitchedLegendsV2.ipa Payload
-
-      - name: Upload IPA
+      - name: Upload patched IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GlitchedLegendsV2-iOS
-          path: ${{ runner.temp }}/ipa/GlitchedLegendsV2.ipa
+          name: GlitchedLegendsV2-iPhoneFix
+          path: ${{ runner.temp }}/GlitchedLegendsV2-iPhoneFix.ipa
           if-no-files-found: error
           compression-level: 0
