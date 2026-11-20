@@ -111,6 +111,7 @@ jobs:
           replace('source/backend/WeekData.hx', '\t\t#if MODS_ALLOWED\n\t\tif (FileSystem.exists("modsList.txt"))',
                   '\t\t#if (ios && MODS_ALLOWED)\n\t\tMods.loadTopMod();\n'
                   '\t\t#elseif MODS_ALLOWED\n\t\tif (FileSystem.exists("modsList.txt"))')
+
           replace('source/lime/utils/Log.hx', 'SUtil.getPath()', 'SUtil.writablePath()', count=3)
           PY
 
@@ -213,4 +214,4 @@ jobs:
           name: Indie-Cross-iOS
           path: ${{ runner.temp }}/indie-ipa/Indie-Cross-iOS.ipa
           if-no-files-found: error
-          compression-level
+          compression-level: 0
